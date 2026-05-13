@@ -21,29 +21,87 @@ def scrape_sportybet(page):
     # Now we hit the API endpoint directly using the browser's authorized context
     response = page.request.get("https://www.sportybet.com/api/ng/factsCenter/popularSportEvents?sportId=sr:sport:1&timeFilter=today&pageSize=50&pageNum=1")
     if response.ok:
-        data = response.json()
-        if "data" in data and "events" in data["data"]:
-            for event in data["data"]["events"]:
-                home = event.get("homeTeamName")
-                away = event.get("awayTeamName")
-                timestamp = event.get("estimateStartTime")
-                if not home or not away or not timestamp:
-                    continue
+        try:
+            data = response.json()
+            if "data" in data and "events" in data["data"]:
+                events_list = data["data"]["events"]
+                print(f"[SportyBet] Endpoint returned {len(events_list)} raw events.")
+                for event in events_list:
+                    home = event.get("homeTeamName")
+                    away = event.get("awayTeamName")
+                    timestamp = event.get("estimateStartTime")
+                    if not home or not away or not timestamp:
+                        continue
+                        
+                    dt = datetime.fromtimestamp(timestamp / 1000)
                     
-                dt = datetime.fromtimestamp(timestamp / 1000)
+                    # Find 1x2 market
+                    odds = {}
+                    for market in event.get("markets", []):
+                        if market.get("name") == "1X2" or market.get("id") == "1":
+                            for outcome in market.get("outcomes", []):
+                                desc = str(outcome.get("desc", "")).lower()
+                                val = float(outcome.get("odds", 0))
+                                if "home" in desc or desc == "1": odds["home"] = val
+                                elif "draw" in desc or desc == "x": odds["draw"] = val
+                                elif "away" in desc or desc == "2": odds["away"] = val
+                            break
+                    
+                    if len(odds) == 3:
+                        events_data.append({
+                            "sport_id": 1,
+                            "home_team": home,
+                            "away_team": away,
+                            "commence_time": dt.strftime("%Y-%m-%d %H:%M:%S"),
+                            "league": event.get("tournament", {}).get("name", "Unknown"),
+                            "odds": {
+                                "sportybet": odds
+                            }
+                        })
+            else:
+                print(f"[SportyBet] 'data' or 'events' missing. Keys found: {list(data.keys())}")
+        except Exception as e:
+            print(f"[SportyBet] JSON parse error: {e}")
+    else:
+        print(f"[SportyBet] Request failed! HTTP Status: {response.status}")
+    return events_data
+
+def scrape_bet9ja(page):
+    print("[Bet9ja] Fetching odds...")
+    events_data = []
+    
+    page.goto("https://sports.bet9ja.com/soccer", wait_until="domcontentloaded")
+    time.sleep(3)
+    
+    response = page.request.get("https://sports-api.bet9ja.com/v3/sportsbook/events/search?sportId=1&marketIds=1&limit=50")
+    if response.ok:
+        try:
+            data = response.json()
+            events_list = data.get("data", [])
+            print(f"[Bet9ja] Endpoint returned {len(events_list)} raw events.")
+            
+            for event in events_list:
+                home = event.get("homeTeam", {}).get("name")
+                away = event.get("awayTeam", {}).get("name")
+                start_str = event.get("startDateTime")
+                if not home or not away or not start_str: continue
                 
-                # Find 1x2 market
+                try:
+                    dt = datetime.strptime(start_str.split('.')[0], "%Y-%m-%dT%H:%M:%S")
+                except:
+                    continue
+                
                 odds = {}
                 for market in event.get("markets", []):
-                    if market.get("name") == "1X2" or market.get("id") == "1":
+                    if market.get("marketId") == 1: # 1X2 market
                         for outcome in market.get("outcomes", []):
-                            desc = str(outcome.get("desc", "")).lower()
-                            val = float(outcome.get("odds", 0))
-                            if "home" in desc or desc == "1": odds["home"] = val
-                            elif "draw" in desc or desc == "x": odds["draw"] = val
-                            elif "away" in desc or desc == "2": odds["away"] = val
+                            desc = str(outcome.get("type", "")).lower()
+                            val = float(outcome.get("price", 0))
+                            if desc == "1": odds["home"] = val
+                            elif desc == "x": odds["draw"] = val
+                            elif desc == "2": odds["away"] = val
                         break
-                
+                        
                 if len(odds) == 3:
                     events_data.append({
                         "sport_id": 1,
@@ -52,9 +110,13 @@ def scrape_sportybet(page):
                         "commence_time": dt.strftime("%Y-%m-%d %H:%M:%S"),
                         "league": event.get("tournament", {}).get("name", "Unknown"),
                         "odds": {
-                            "sportybet": odds
+                            "bet9ja": odds
                         }
                     })
+        except Exception as e:
+            print(f"[Bet9ja] JSON parse error: {e}")
+    else:
+        print(f"[Bet9ja] Request failed! HTTP Status: {response.status}")
     return events_data
 
 def main():
@@ -79,7 +141,13 @@ def main():
         except Exception as e:
             print(f"[SportyBet] Error: {e}")
             
-        # 2. You can add scrape_bet9ja(page) here next!
+        # 2. Scrape Bet9ja
+        try:
+            bet9ja_events = scrape_bet9ja(page)
+            print(f"[Bet9ja] Found {len(bet9ja_events)} valid events.")
+            all_events.extend(bet9ja_events)
+        except Exception as e:
+            print(f"[Bet9ja] Error: {e}")
         
         browser.close()
         
