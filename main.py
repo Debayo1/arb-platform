@@ -59,11 +59,48 @@ def scrape_sportybet(page):
 
     page.on("response", handle_response)
     
-    # Navigate and scroll to trigger API calls
-    page.goto("https://www.sportybet.com/ng/sport/football", wait_until="networkidle")
-    page.evaluate("window.scrollBy(0, 1000)")
-    time.sleep(3)
-    
+    try:
+        page.goto("https://www.sportybet.com/ng/sport/football", wait_until="networkidle", timeout=30000)
+        page.evaluate("window.scrollBy(0, 1000)")
+        time.sleep(4)
+    except Exception as e:
+        print(f"[SportyBet] Goto Error ignored: {e}")
+        
+    # Fallback: Extract from window.__INITIAL_STATE__ if interception found 0
+    if not events_data:
+        try:
+            print("[SportyBet] Interception found 0 events, attempting DOM extraction fallback...")
+            state = page.evaluate("window.__INITIAL_STATE__")
+            if state and "match" in state:
+                for event in state["match"].get("eventList", []):
+                    home = event.get("homeTeamName")
+                    away = event.get("awayTeamName")
+                    timestamp = event.get("estimateStartTime")
+                    if not home or not away or not timestamp: continue
+                    
+                    dt = datetime.fromtimestamp(timestamp / 1000)
+                    odds = {}
+                    for market in event.get("markets", []):
+                        if market.get("name") == "1X2" or str(market.get("id")) == "1":
+                            for outcome in market.get("outcomes", []):
+                                desc = str(outcome.get("desc", "")).lower()
+                                val = float(outcome.get("odds", 0))
+                                if "home" in desc or desc == "1": odds["home"] = val
+                                elif "draw" in desc or desc == "x": odds["draw"] = val
+                                elif "away" in desc or desc == "2": odds["away"] = val
+                            break
+                    if len(odds) == 3:
+                        events_data.append({
+                            "sport_id": 1,
+                            "home_team": home,
+                            "away_team": away,
+                            "commence_time": dt.strftime("%Y-%m-%d %H:%M:%S"),
+                            "league": event.get("tournament", {}).get("name", "Unknown"),
+                            "odds": {"sportybet": odds}
+                        })
+        except Exception as e:
+            print(f"[SportyBet] Fallback parsing failed: {e}")
+
     # Deduplicate events
     unique_events = {e["home_team"] + e["away_team"]: e for e in events_data}
     return list(unique_events.values())
@@ -121,9 +158,10 @@ def scrape_bet9ja(page):
     page.on("response", handle_response)
     
     try:
-        # Use web.bet9ja.com as it has fewer HTTP/2 protocol errors than sports.bet9ja.com
-        page.goto("https://web.bet9ja.com/Sport/Default.aspx", wait_until="networkidle")
-        time.sleep(3)
+        # Bet9ja blocks HTTP/2 aggressively, but our launch args disable it.
+        # Use sports.bet9ja.com as it's the direct sports app
+        page.goto("https://sports.bet9ja.com/soccer", wait_until="domcontentloaded", timeout=30000)
+        time.sleep(6) # Bet9ja takes a moment to load XHRs
     except Exception as e:
         print(f"[Bet9ja] Goto Error ignored: {e}")
         
@@ -136,11 +174,22 @@ def main():
     all_events = []
     
     with sync_playwright() as p:
-        # Launch headless browser
-        browser = p.chromium.launch(headless=True)
+        # Launch headless browser with anti-bot arguments
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-http2", # Bypasses HTTP/2 fingerprinting (fixes Bet9ja)
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--window-size=1920,1080"
+            ]
+        )
         # Use a realistic user agent
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            ignore_https_errors=True
         )
         page = context.new_page()
         
