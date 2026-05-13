@@ -11,34 +11,33 @@ PHP_API_URL = "http://localhost:8000/api/receive_odds.php"
 API_KEY = "ARB_SECRET_KEY_12345"
 
 def scrape_sportybet(page):
-    print("[SportyBet] Fetching odds...")
+    print("[SportyBet] Fetching odds via Network Interception...")
     events_data = []
     
-    # We load the main page first to get cookies and bypass Cloudflare
-    page.goto("https://www.sportybet.com/ng/sport/football", wait_until="domcontentloaded")
-    time.sleep(3) # Wait for anti-bot checks
-    
-    # Now we hit the API endpoint directly using the browser's authorized context
-    response = page.request.get("https://www.sportybet.com/api/ng/factsCenter/popularSportEvents?sportId=sr:sport:1&timeFilter=today&pageSize=50&pageNum=1")
-    if response.ok:
+    # We will listen to all network responses
+    def handle_response(response):
         try:
-            data = response.json()
-            if "data" in data and "events" in data["data"]:
-                events_list = data["data"]["events"]
-                print(f"[SportyBet] Endpoint returned {len(events_list)} raw events.")
+            # Look for API responses containing "factsCenter" or "events"
+            if "factsCenter" in response.url and response.status == 200:
+                data = response.json()
+                if "data" in data and isinstance(data["data"], list):
+                    # Sometimes sportybet returns a list of events directly in data
+                    events_list = data["data"]
+                elif "data" in data and "events" in data["data"]:
+                    events_list = data["data"]["events"]
+                else:
+                    return
+
                 for event in events_list:
                     home = event.get("homeTeamName")
                     away = event.get("awayTeamName")
                     timestamp = event.get("estimateStartTime")
-                    if not home or not away or not timestamp:
-                        continue
-                        
-                    dt = datetime.fromtimestamp(timestamp / 1000)
+                    if not home or not away or not timestamp: continue
                     
-                    # Find 1x2 market
+                    dt = datetime.fromtimestamp(timestamp / 1000)
                     odds = {}
                     for market in event.get("markets", []):
-                        if market.get("name") == "1X2" or market.get("id") == "1":
+                        if market.get("name") == "1X2" or str(market.get("id")) == "1":
                             for outcome in market.get("outcomes", []):
                                 desc = str(outcome.get("desc", "")).lower()
                                 val = float(outcome.get("odds", 0))
@@ -46,7 +45,6 @@ def scrape_sportybet(page):
                                 elif "draw" in desc or desc == "x": odds["draw"] = val
                                 elif "away" in desc or desc == "2": odds["away"] = val
                             break
-                    
                     if len(odds) == 3:
                         events_data.append({
                             "sport_id": 1,
@@ -54,70 +52,83 @@ def scrape_sportybet(page):
                             "away_team": away,
                             "commence_time": dt.strftime("%Y-%m-%d %H:%M:%S"),
                             "league": event.get("tournament", {}).get("name", "Unknown"),
-                            "odds": {
-                                "sportybet": odds
-                            }
+                            "odds": {"sportybet": odds}
                         })
-            else:
-                print(f"[SportyBet] 'data' or 'events' missing. Keys found: {list(data.keys())}")
-        except Exception as e:
-            print(f"[SportyBet] JSON parse error: {e}")
-    else:
-        print(f"[SportyBet] Request failed! HTTP Status: {response.status}")
-    return events_data
+        except:
+            pass
 
-def scrape_bet9ja(page):
-    print("[Bet9ja] Fetching odds...")
-    events_data = []
+    page.on("response", handle_response)
     
-    page.goto("https://sports.bet9ja.com/soccer", wait_until="domcontentloaded")
+    # Navigate and scroll to trigger API calls
+    page.goto("https://www.sportybet.com/ng/sport/football", wait_until="networkidle")
+    page.evaluate("window.scrollBy(0, 1000)")
     time.sleep(3)
     
-    response = page.request.get("https://sports-api.bet9ja.com/v3/sportsbook/events/search?sportId=1&marketIds=1&limit=50")
-    if response.ok:
+    # Deduplicate events
+    unique_events = {e["home_team"] + e["away_team"]: e for e in events_data}
+    return list(unique_events.values())
+
+def scrape_bet9ja(page):
+    print("[Bet9ja] Fetching odds via Network Interception...")
+    events_data = []
+    
+    def handle_response(response):
         try:
-            data = response.json()
-            events_list = data.get("data", [])
-            print(f"[Bet9ja] Endpoint returned {len(events_list)} raw events.")
-            
-            for event in events_list:
-                home = event.get("homeTeam", {}).get("name")
-                away = event.get("awayTeam", {}).get("name")
-                start_str = event.get("startDateTime")
-                if not home or not away or not start_str: continue
-                
-                try:
-                    dt = datetime.strptime(start_str.split('.')[0], "%Y-%m-%dT%H:%M:%S")
-                except:
-                    continue
-                
-                odds = {}
-                for market in event.get("markets", []):
-                    if market.get("marketId") == 1: # 1X2 market
-                        for outcome in market.get("outcomes", []):
-                            desc = str(outcome.get("type", "")).lower()
-                            val = float(outcome.get("price", 0))
-                            if desc == "1": odds["home"] = val
-                            elif desc == "x": odds["draw"] = val
-                            elif desc == "2": odds["away"] = val
-                        break
+            if "events/search" in response.url or "marketIds=1" in response.url or "prematch" in response.url:
+                if response.status == 200:
+                    data = response.json()
+                    events_list = data.get("data", []) if "data" in data else data
+                    if isinstance(events_list, dict) and "events" in events_list:
+                        events_list = events_list["events"]
                         
-                if len(odds) == 3:
-                    events_data.append({
-                        "sport_id": 1,
-                        "home_team": home,
-                        "away_team": away,
-                        "commence_time": dt.strftime("%Y-%m-%d %H:%M:%S"),
-                        "league": event.get("tournament", {}).get("name", "Unknown"),
-                        "odds": {
-                            "bet9ja": odds
-                        }
-                    })
-        except Exception as e:
-            print(f"[Bet9ja] JSON parse error: {e}")
-    else:
-        print(f"[Bet9ja] Request failed! HTTP Status: {response.status}")
-    return events_data
+                    for event in events_list:
+                        home = event.get("homeTeam", {}).get("name") or event.get("home")
+                        away = event.get("awayTeam", {}).get("name") or event.get("away")
+                        start_str = event.get("startDateTime") or event.get("time")
+                        if not home or not away or not start_str: continue
+                        
+                        try:
+                            if "T" in str(start_str):
+                                dt = datetime.strptime(str(start_str).split('.')[0], "%Y-%m-%dT%H:%M:%S")
+                            else:
+                                dt = datetime.fromtimestamp(int(start_str)/1000)
+                        except:
+                            continue
+                        
+                        odds = {}
+                        for market in event.get("markets", []):
+                            if str(market.get("marketId")) == "1" or market.get("name") == "1X2":
+                                for outcome in market.get("outcomes", []):
+                                    desc = str(outcome.get("type", outcome.get("name", ""))).lower()
+                                    val = float(outcome.get("price", outcome.get("odds", 0)))
+                                    if desc == "1": odds["home"] = val
+                                    elif desc == "x": odds["draw"] = val
+                                    elif desc == "2": odds["away"] = val
+                                break
+                                
+                        if len(odds) == 3:
+                            events_data.append({
+                                "sport_id": 1,
+                                "home_team": home,
+                                "away_team": away,
+                                "commence_time": dt.strftime("%Y-%m-%d %H:%M:%S"),
+                                "league": event.get("tournament", {}).get("name", "Unknown"),
+                                "odds": {"bet9ja": odds}
+                            })
+        except:
+            pass
+
+    page.on("response", handle_response)
+    
+    try:
+        # Use web.bet9ja.com as it has fewer HTTP/2 protocol errors than sports.bet9ja.com
+        page.goto("https://web.bet9ja.com/Sport/Default.aspx", wait_until="networkidle")
+        time.sleep(3)
+    except Exception as e:
+        print(f"[Bet9ja] Goto Error ignored: {e}")
+        
+    unique_events = {e["home_team"] + e["away_team"]: e for e in events_data}
+    return list(unique_events.values())
 
 def main():
     print(f"=== Starting Hybrid Scraper at {datetime.now()} ===")
