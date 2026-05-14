@@ -284,25 +284,35 @@ def main():
     all_events = []
     
     with sync_playwright() as p:
-        # Launch headless browser (True for Render, False for local debugging)
+        # Launch headless browser with memory optimizations
         is_headless = os.getenv("HEADLESS", "true").lower() == "true"
         browser = p.chromium.launch(
             headless=is_headless,
             args=[
-                "--disable-http2", # Bypasses HTTP/2 fingerprinting (fixes Bet9ja)
-                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage", # Crucial for Docker/Render
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
-                "--window-size=1920,1080"
+                "--disable-gpu",
+                "--disable-software-rasterizer",
+                "--disable-dev-tools",
+                "--single-process", # Reduces memory
+                "--js-flags='--max-old-space-size=256'" # Limits JS memory
             ]
         )
-        # Use a realistic user agent
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080},
+            viewport={"width": 1280, "height": 720}, # Smaller viewport = less memory
             ignore_https_errors=True
         )
         page = context.new_page()
+
+        # BLOCK IMAGES, CSS, AND MEDIA TO SAVE MEMORY
+        def block_aggressively(route):
+            if route.request.resource_type in ["image", "media", "font"]:
+                route.abort()
+            else:
+                route.continue_()
+        page.route("**/*", block_aggressively)
         
         # 1. Scrape SportyBet
         try:
